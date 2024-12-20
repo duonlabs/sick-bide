@@ -1,0 +1,11 @@
+__pycache__
+
+.pytest_cache
+.vscode
+*.txt
+*.mp4
+*.gif
+*.png
+*.ncu-rep
+
+paper
