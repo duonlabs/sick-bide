@@ -30,8 +30,8 @@ def sick_integral_kernel_fwd(
     for _ in range(p_size):
         h = tl.maximum(p1 + tl.load(p2_ptr), 0.0) # [P1_BLOCK_SIZE, hidden_size]
         logits = tl.sum(h*r, axis=-1) # [P1_BLOCK_SIZE]
-        new_m = tl.maximum(m, tl.max(logits, axis=-1)) # []
-        se = se * tl.exp(m - new_m) + tl.sum(tl.exp(logits-new_m), axis=-1) # []
+        new_m = tl.maximum(m, tl.max(logits)) # []
+        se = se * tl.exp(m - new_m) + tl.sum(tl.exp(logits-new_m)) # []
         m = new_m
         p2_ptr += hidden_size
     # Store the results
