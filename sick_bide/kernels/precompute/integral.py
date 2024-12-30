@@ -26,10 +26,10 @@ def sick_integral_kernel_fwd(
     # Compute the integral over the block
     m = -float("inf")
     se = 0.0
-    p2_ptr = p2_ptr + p_strided_n + tl.arange(0, hidden_size) # [hidden_size]
+    p2_ptr = p2_ptr + p_strided_n + tl.arange(0, hidden_size)[None] # [P2_BLOCK_SIZE, hidden_size]
     for _ in range(p_size):
-        h = tl.maximum(p1 + tl.load(p2_ptr), 0.0) # [P1_BLOCK_SIZE, hidden_size]
-        logits = tl.sum(h*r, axis=-1) # [P1_BLOCK_SIZE]
+        h = tl.maximum(p1[:, None] + tl.load(p2_ptr), 0.0) # [P1_BLOCK_SIZE, P2_BLOCK_SIZE, hidden_size]
+        logits = tl.sum(h*r, axis=-1) # [P1_BLOCK_SIZE, P2_BLOCK_SIZE]
         new_m = tl.maximum(m, tl.max(logits)) # []
         se = se * tl.exp(m - new_m) + tl.sum(tl.exp(logits-new_m)) # []
         m = new_m
