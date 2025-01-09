@@ -7,9 +7,8 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
 from typing import Tuple
-from sick_bide.kernels.utils import value_to_binary_representation
-from sick_bide.utils import EL_SIZE2UINT_DTYPE, NBITS2FLOAT_DTYPE
 from sick_bide import BIDE
+from sick_bide.utils import ELS2GEN, CAT2ELS2DTY, DTY2CAT
 
 lt.monkey_patch()
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -20,7 +19,6 @@ BATCH_SIZE = 64
 MIN_LR = 1e-5
 MAX_LR = 1e-1
 N_BITS = 16
-
 
 class MultipleBIDE(torch.nn.Module):
     def __init__(self, n_dists: int, n_bits: int = 16, hidden_factor: int = 2):
@@ -41,29 +39,33 @@ class MultipleBIDE(torch.nn.Module):
         r = self.rs[x] # [B, H]
         return W, r
 
-true_dists = [
-    torch.distributions.Normal(3, 1),
-    torch.distributions.Gamma(2, 1),
-    torch.distributions.MixtureSameFamily(
+N_SAMPLES = 64
+targets = [
+    (torch.distributions.Normal(3, 1), torch.linspace(-2, 8, N_SAMPLES, device=device)),
+    (torch.distributions.Gamma(2, 1), torch.linspace(-1, 8, N_SAMPLES, device=device)),
+    (torch.distributions.MixtureSameFamily(
         torch.distributions.Categorical(torch.tensor([0.2, 0.8])),
-        torch.distributions.Normal(torch.tensor([120.0, 132.0]), torch.tensor([1.0, 1.5]))
-    ),
-    torch.distributions.Pareto(1.0, 1.0),
+        torch.distributions.Normal(torch.tensor([20.0, 32.0]), torch.tensor([1.0, 1.5]))
+    ), torch.linspace(10, 50, N_SAMPLES, device=device)),
+    (torch.distributions.Pareto(1.0, 1.0), torch.linspace(-1, 20, N_SAMPLES, device=device)),
+    (torch.distributions.Poisson(5), torch.arange(64, device=device, dtype=torch.float32)),
+    (torch.distributions.Binomial(10, 0.5), torch.arange(64, device=device, dtype=torch.float32)),
 ]
 
-def sample_true_dists(dist_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    samples = torch.empty(len(dist_ids), dtype=torch.float16, device=device)
-    for i, dist in enumerate(true_dists):
+def sample_true_dists(dist_ids: torch.Tensor, els: int = 2) -> Tuple[torch.Tensor, torch.Tensor]:
+    gen_dtype = ELS2GEN[els]
+    samples = torch.empty(len(dist_ids), dtype=gen_dtype, device=device)
+    for i, (dist, _) in enumerate(targets):
         mask_i = dist_ids == i
         n_samples_i = (mask_i).sum()
         if n_samples_i == 0:
             continue
         samples_i = dist.sample((n_samples_i,)).to(device)
-        samples[mask_i] = samples_i.to(samples.dtype)
+        samples[mask_i] = samples_i.to(CAT2ELS2DTY[DTY2CAT[samples_i.dtype]][els]).view(gen_dtype)
 
     return samples
 
-model = MultipleBIDE(len(true_dists), n_bits=N_BITS, hidden_factor=2).to(device)
+model = MultipleBIDE(len(targets), n_bits=N_BITS, hidden_factor=2).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=MAX_LR, betas=(0.9, 0.96))
 scheduler = torch.optim.lr_scheduler.ExponentialLR(
     optimizer,
@@ -77,21 +79,14 @@ step_numbers = []
 loss_h = []
 loss_h_ema = []
 
-X_test = torch.arange(len(true_dists), device=device)
-xs = []
-b = torch.linspace(-5, 5, 64, device=device, dtype=torch.float32)
-for dist in true_dists:
-    xs.append(
-        (dist.mean if  torch.isfinite(dist.mean) else 0)
-        + b * (dist.stddev if torch.isfinite(dist.stddev) else 5)
-    )
-xs = torch.stack(xs, dim=0) # [4, 32]
-x_vals = ((xs[..., :-1] + xs[..., 1:]) / 2) # [4, 31]
+X_test = torch.arange(len(targets), device=device)
+dtype_cat = torch.tensor([DTY2CAT[x.dtype].value for _, x in targets], device=device)
+xs_viz = torch.stack([torch.cat((x, x.new_zeros(N_SAMPLES-len(x)))).to(CAT2ELS2DTY[DTY2CAT[x.dtype]][2]).view(ELS2GEN[2]) for _, x in targets], axis=0) # [4, N_SAMPLES]
 
 for i in range(N_STEPS):
     if i == 1:
         t_start = time.time() # Skip the warmup step in the timing
-    X = torch.randint(len(true_dists), (BATCH_SIZE,), device=device) # [B]
+    X = torch.randint(len(targets), (BATCH_SIZE,), device=device) # [B]
     y = sample_true_dists(X) # [B]
     W, r = model(X) # [B, H, N], [B, H]
     bide = BIDE(W, r)
@@ -112,26 +107,33 @@ for i in range(N_STEPS):
         model.eval()
         with torch.no_grad():
             W, r = model(X_test) # [B, H, N], [B, H]
-            bide = BIDE(W, r)
-            log_cdf = bide.log_cdf(xs.to(torch.float16))
+            bide = BIDE(W, r, dtype_cat)
+            log_cdf = bide.log_cdf(xs_viz) # [B, N_SAMPLES]
         # Save the data for this frame
         cdf_frames.append(log_cdf.exp().cpu().numpy())
         # Compute density
         p = torch.diff(log_cdf.exp(), dim=-1)
-        d = (p / torch.diff(xs, dim=-1)).cpu().numpy() # [B, 100]
-        density_frames.append(d)
+        d = []
+        for i, (_, xs) in enumerate(targets):
+            # d.append((p[i] / torch.diff(xs, dim=-1)).cpu())
+            d.append((p[i][:len(xs)-1] / torch.diff(xs, dim=-1)).cpu())
+        density_frames.append(torch.stack(d, axis=0).numpy())
         step_numbers.append(i)
 print(f"Training took {time.time() - t_start:.2f} seconds")
 print(f"Peak memory usage: {torch.cuda.max_memory_allocated() / 2**20:.2f} MB")
 # Determine fixed y-axis limits
-xs, x_vals = xs.cpu(), x_vals.cpu()
+targets = [(dist, xs.cpu()) for dist, xs in targets]
 true_cdfs = []
 true_densities = []
-for i, true_dist in enumerate(true_dists):
-    true_cdfs.append(true_dist.cdf(xs[i]))
-    true_densities.append(true_dist.log_prob(x_vals[i]).exp())
-true_cdfs = torch.stack(true_cdfs, axis=0) # [4, 32]
-true_densities = torch.stack(true_densities, axis=0) # [4, 31]
+for i, (true_dist, xs) in enumerate(targets):
+    try:
+        true_cdfs.append(true_dist.cdf(xs))
+    except NotImplementedError:
+        true_cdfs.append(true_dist.log_prob(xs).exp().cumsum(-1))
+    true_densities.append(true_dist.log_prob((xs[:-1]+xs[1:])/2).exp())
+
+true_cdfs = torch.stack(true_cdfs, axis=0) # [4, N_SAMPLES]
+true_densities = torch.stack(true_densities, axis=0) # [4, N_SAMPLES-1]
 max_cdf_y = 1.05  # # Max window size for CDF plots
 max_density_y = 1.2 * true_densities.nan_to_num(-float("inf")).max(-1).values  # Max window size for density plots
 # Create the figure and axes
@@ -150,11 +152,11 @@ true_lines_cdf = []
 true_lines_density = []
 
 # Initialize plots
-for i in range(len(X_test)):
+for i, (_, xs) in enumerate(targets):
     # CDF
-    line_cdf, = axes[0, i].plot(xs[i], cdf_array[0, i], label='Fitted CDF')
-    true_line_cdf, = axes[0, i].plot(xs[i], true_cdfs[i], '--', label='True CDF', zorder=-1)
-    axes[0, i].fill_between(xs[i], 0, cdf_array[0, i], alpha=0.2, color=line_cdf.get_color())
+    line_cdf, = axes[0, i].plot(xs, cdf_array[0, i], label='Fitted CDF')
+    true_line_cdf, = axes[0, i].plot(xs, true_cdfs[i], '--', label='True CDF', zorder=-1)
+    axes[0, i].fill_between(xs, 0, cdf_array[0, i], alpha=0.2, color=line_cdf.get_color())
     axes[0, i].set_ylim(0, max_cdf_y)
     axes[0, i].set_xlabel('x')
     axes[0, i].set_ylabel('CDF')
@@ -163,9 +165,10 @@ for i in range(len(X_test)):
     true_lines_cdf.append(true_line_cdf)
 
     # Density
-    line_density, = axes[1, i].plot(x_vals[i], density_array[0, i], label='Fitted Density')
-    true_line_density, = axes[1, i].plot(x_vals[i], true_densities[i], '--', label='True Density', zorder=-1)
-    axes[1, i].fill_between(x_vals[i], 0, density_array[0, i], alpha=0.2, color=line_density.get_color())
+    x_vals = (xs[:-1] + xs[1:]) / 2
+    line_density, = axes[1, i].plot(x_vals, density_array[0, i], label='Fitted Density')
+    true_line_density, = axes[1, i].plot(x_vals, true_densities[i], '--', label='True Density', zorder=-1)
+    axes[1, i].fill_between(x_vals, 0, density_array[0, i], alpha=0.2, color=line_density.get_color())
     axes[1, i].set_ylim(0, max_density_y[i] if np.isfinite(max_density_y[i]) else 1.0)
     axes[1, i].set_xlabel('x')
     axes[1, i].set_ylabel('Density')
@@ -176,23 +179,24 @@ for i in range(len(X_test)):
 def init():
     # Global title
     fig.suptitle("Distributions estimations (CDF and Density)")
-    for i in range(len(X_test)):
-        lines_cdf[i].set_data(xs[i], cdf_array[0, i])
-        lines_density[i].set_data(x_vals[i], density_array[0, i])
+    for i, (_, xs) in enumerate(targets):
+        lines_cdf[i].set_data(xs, cdf_array[0, i])
+        lines_density[i].set_data((xs[:-1] + xs[1:]) / 2, density_array[0, i])
     return lines_cdf + lines_density
 
 def animate(frame_idx):
-    for i in range(len(X_test)):
-        lines_cdf[i].set_data(xs[i], cdf_array[frame_idx, i])
-        lines_density[i].set_data(x_vals[i], density_array[frame_idx, i])
+    for i, (_, xs) in enumerate(targets):
+        x_vals = (xs[:-1] + xs[1:]) / 2
+        lines_cdf[i].set_data(xs, cdf_array[frame_idx, i])
+        lines_density[i].set_data(x_vals, density_array[frame_idx, i])
         # Clear previous fill_between collections
         for collection in axes[0, i].collections:
             collection.remove()
         for collection in axes[1, i].collections:
             collection.remove()
         
-        axes[0, i].fill_between(xs[i], 0, cdf_array[frame_idx, i], alpha=0.2, color=lines_cdf[i].get_color())
-        axes[1, i].fill_between(x_vals[i], 0, density_array[frame_idx, i], alpha=0.2, color=lines_density[i].get_color())
+        axes[0, i].fill_between(xs, 0, cdf_array[frame_idx, i], alpha=0.2, color=lines_cdf[i].get_color())
+        axes[1, i].fill_between(x_vals, 0, density_array[frame_idx, i], alpha=0.2, color=lines_density[i].get_color())
     return lines_cdf + lines_density
 
 ani = animation.FuncAnimation(fig, animate, frames=len(cdf_frames), init_func=init, interval=100, blit=True, repeat=True)
@@ -208,5 +212,3 @@ plt.xlabel("Step")
 plt.ylabel("NLL")
 plt.legend()
 plt.savefig("training_loss.png")
-
-

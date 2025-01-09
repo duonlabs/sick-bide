@@ -1,5 +1,6 @@
 import torch
 
+from typing import Optional
 from sick_bide.kernels import sick_nll_kernel
 from sick_bide.reference import sick_log_prob_kernel, sick_log_cdf_kernel
 # from sick_bide.reference import sick_nll_kernel, sick_log_prob_kernel, sick_log_cdf_kernel
@@ -9,16 +10,18 @@ from sick_bide.utils import compute_log_bucket_width
 
 class BIDE(torch.nn.Module):
     """ Binary Implicit Distribution Encoding. The BIDE layer maps arbitrary values to logits leveraging their binary representation. """
-    def __init__(self, W: torch.Tensor, r: torch.Tensor):
+    def __init__(self, W: torch.Tensor, r: torch.Tensor, dtype_cat: Optional[torch.Tensor] = None):
         """
             W: [B, H, N]
             r: [B, H]
+            dtype_cat: [B] - Optionnal - will detemrine ordering mode in CDF computation
         """
         super().__init__()
         self.batch_size, self.hidden_size, self.n_bits = W.shape
         # The SICK layer is a simple 1 hidden layer MLP with a single output
         self.W = W
         self.r = r
+        self.dtype_cat = dtype_cat
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -41,7 +44,8 @@ class BIDE(torch.nn.Module):
         """
             x: [B, ...]
         """
-        log_cdf = sick_log_cdf_kernel(self.W.to(torch.float16), self.r.to(torch.float16), x).to(torch.float32)
+        assert self.dtype_cat is not None, "dtype_cat must be provided to compute the CDF"
+        log_cdf = sick_log_cdf_kernel(self.W.to(torch.float16), self.r.to(torch.float16), x, self.dtype_cat).to(torch.float32)
         return log_cdf
     
     def nll(self, y: torch.Tensor) -> torch.Tensor:

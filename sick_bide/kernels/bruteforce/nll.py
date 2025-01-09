@@ -3,7 +3,7 @@ import torch
 import triton
 import triton.language as tl
 
-from ..utils import EL_SIZE2UINT_DTYPE
+from ..utils import DTYPECAT, CAT2ELS2DTY
 from .integral import _sick_integral_kernel
 from ..utils import bide_logits
 
@@ -58,7 +58,7 @@ def sick_nll_kernel_bwd(
 
 @torch.compile
 def compute_dW_dr_from_acc(W_acc: torch.Tensor, r_acc: torch.Tensor, W: torch.Tensor, r: torch.Tensor, y: torch.Tensor, lse: torch.Tensor, grad_output: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    x = ((y.unsqueeze(-1).view(EL_SIZE2UINT_DTYPE[y.element_size()]).long() >> torch.arange(W.shape[-1], device=W.device))&1).to(W.dtype) * 2 - 1 # [B, N]
+    x = ((y.unsqueeze(-1).view(CAT2ELS2DTY[DTYPECAT.UINT][y.element_size()]).long() >> torch.arange(W.shape[-1], device=W.device))&1).to(W.dtype) * 2 - 1 # [B, N]
     h = torch.nn.functional.relu(x[:, None, :] @ W.permute(0, 2, 1)).squeeze(1) # [B, H]
     W_grad = (W_acc/lse.exp()[:, None, None] - (torch.where((h>0)[:, :, None], x[:, None, :], 0.0) * r[:, :, None]))*grad_output[:, None, None] # [B, H, N]
     r_grad = (r_acc/lse.exp()[:, None]-h)*grad_output[:, None] # [B, H]

@@ -1,6 +1,6 @@
 import torch
 
-from ..utils import EL_SIZE2UINT_DTYPE
+from ..utils import DTYPECAT, CAT2ELS2DTY
 
 @torch.compile
 def combine_softmax_integral_blocks(lses: torch.Tensor, ms: torch.Tensor) -> torch.Tensor:
@@ -14,7 +14,7 @@ def value_to_binary_representation(value: torch.Tensor, n_bits: int, dtype: torc
         value: [B]
         n_bits: int
     """
-    return ((value.unsqueeze(-1).view(EL_SIZE2UINT_DTYPE[value.element_size()]).long() >> torch.arange(n_bits, device=value.device))&1).to(dtype) * 2 - 1 # [B, N]
+    return ((value.unsqueeze(-1).view(CAT2ELS2DTY[DTYPECAT.UINT][value.element_size()]).long() >> torch.arange(n_bits, device=value.device))&1).to(dtype) * 2 - 1 # [B, N]
 
 @torch.compile
 def bide_logits(W: torch.Tensor, r: torch.Tensor, v: torch.Tensor) -> torch.Tensor:

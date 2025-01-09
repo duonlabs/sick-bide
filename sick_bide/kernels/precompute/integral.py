@@ -9,31 +9,33 @@ from ..utils import combine_softmax_integral_blocks
 def sick_integral_kernel_fwd(
     p1_ptr, p2_ptr, r_ptr, lses_ptr, ms_ptr,
     hidden_size: tl.constexpr, p_size: tl.constexpr,
-    P1_BLOCK_SIZE: tl.constexpr,
+    P1_BLOCK_SIZE: tl.constexpr, P2_BLOCK_SIZE: tl.constexpr
 ):
     # Handle ids
     n_pid, p1_pid = tl.program_id(0), tl.program_id(1) # Batch pid, combinatorial pid
     p1_id = p1_pid * P1_BLOCK_SIZE + tl.arange(0, P1_BLOCK_SIZE) # [P1_BLOCK_SIZE] - Input value
+    p2_id = tl.arange(0, P2_BLOCK_SIZE) # [P2_BLOCK_SIZE] - Input value
     h_id = tl.arange(0, hidden_size) # [hidden_size] - Hidden id
     # Load tensors
     r = tl.load(r_ptr + n_pid * hidden_size + h_id) # [hidden_size]
     p_strided_n = n_pid * p_size * hidden_size
     p1 = tl.load(
         p1_ptr + p_strided_n
-        + p1_id[:, None] * hidden_size # [P1_BLOCK_SIZE, 1]
-        + h_id[None, :] # [1, hidden_size]
-    ) # [P1_BLOCK_SIZE, hidden_size]
+        + p1_id.reshape(P1_BLOCK_SIZE, 1, 1, can_reorder=True) * hidden_size # [P1_BLOCK_SIZE, 1]
+        + h_id.reshape(1, 1, hidden_size) # [1, hidden_size]
+    ) # [P1_BLOCK_SIZE, 1, hidden_size]
     # Compute the integral over the block
     m = -float("inf")
     se = 0.0
-    p2_ptr = p2_ptr + p_strided_n + tl.arange(0, hidden_size)[None] # [P2_BLOCK_SIZE, hidden_size]
-    for _ in range(p_size):
-        h = tl.maximum(p1[:, None] + tl.load(p2_ptr), 0.0) # [P1_BLOCK_SIZE, P2_BLOCK_SIZE, hidden_size]
+    p2_ptr = p2_ptr + p_strided_n + p2_id.reshape(P2_BLOCK_SIZE, 1, can_reorder=True) * hidden_size + tl.arange(0, hidden_size) # [P2_BLOCK_SIZE, hidden_size]
+    zero = tl.zeros((1,), dtype=p1_ptr.dtype.element_ty)
+    for _ in range(p_size//P2_BLOCK_SIZE):
+        h = tl.maximum(p1 + tl.load(p2_ptr), zero) # [P1_BLOCK_SIZE, P2_BLOCK_SIZE, hidden_size]
         logits = tl.sum(h*r, axis=-1) # [P1_BLOCK_SIZE, P2_BLOCK_SIZE]
         new_m = tl.maximum(m, tl.max(logits)) # []
         se = se * tl.exp(m - new_m) + tl.sum(tl.exp(logits-new_m)) # []
         m = new_m
-        p2_ptr += hidden_size
+        p2_ptr += P2_BLOCK_SIZE*hidden_size
     # Store the results
     n_p1_blocks = p_size // P1_BLOCK_SIZE
     tl.store(lses_ptr + n_pid * n_p1_blocks + p1_pid, tl.log(se))
@@ -53,7 +55,7 @@ def precompute_blocks_fwd(W: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
 class _sick_integral_kernel(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, W: torch.Tensor, r: torch.Tensor, block_size: Tuple[int] = (256,), num_warps: int = 2) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(ctx, W: torch.Tensor, r: torch.Tensor, block_size: Tuple[int] = (128, 16), num_warps: int = 2) -> Tuple[torch.Tensor, torch.Tensor]:
         """
             W: [B, H, N]
             r: [B, H]

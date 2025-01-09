@@ -15,7 +15,7 @@ class CustomCTX:
         self.saved_tensors = args
 
 n_bits = 16
-hidden_factor = 1
+hidden_factor = 2
 batch_size = 1024
 hidden_size = n_bits * hidden_factor
 reference_batch_size = 128
@@ -69,10 +69,11 @@ def precompute_forward():
     from sick_bide.kernels.precompute.integral import _sick_integral_kernel as _sick_integral_kernel_precompute
     expected_lse, expected_m = get_expected_values_forward()
     return tune(
-        lambda **args: partial(_sick_integral_kernel_precompute.forward, block_size=(args["block_size"],), num_warps=args["num_warps"]),
+        lambda **args: partial(_sick_integral_kernel_precompute.forward, block_size=(args["p1_block_size"],args["p2_block_size"]), num_warps=args["num_warps"]),
         {
-            "block_size": [32, 64, 128, 256],
-            "num_warps": [2, 4, 8, 16, 32]
+            "p1_block_size": [64, 128, 256],
+            "p2_block_size": [8, 16, 32, 64],
+            "num_warps": [2, 4]
         },
         (expected_lse, expected_m),
         ctx, W, r
@@ -103,10 +104,11 @@ def precompute_backward():
     W.grad, r.grad = None, None
     _sick_nll_kernel_precompute.forward(ctx, y, W, r)
     return tune(
-        lambda **args: partial(_sick_nll_kernel_precompute.backward, block_size=(args["block_size"],), num_warps=args["num_warps"]),
+        lambda **args: partial(_sick_nll_kernel_precompute.backward, block_size=(args["p1_block_size"], args["p2_block_size"]), num_warps=args["num_warps"]),
         {
-            "block_size": [64, 128, 256],
-            "num_warps": [2, 4, 8]
+            "p1_block_size": [8, 16, 32, 64, 128, 256],
+            "p2_block_size": [1, 2, 4, 8],
+            "num_warps": [2, 4]
         },
         (None, W_grad_expected, r_grad_expected),
         ctx, dy
