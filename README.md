@@ -7,6 +7,8 @@ SICK BIDE introduces an innovative paradigm for representing and working with co
 
 This paradigm has wide-reaching applications, from improving the way we process tabular data and time series to redefining how we model embeddings for AI systems like large language models (LLMs). By integrating SICK BIDE into your workflows, you can explore new possibilities for working with data in its most fundamental binary form.
 
+👉 For more insights join the [DuonLabs community on telegram](https://t.me/DuonLabs)
+
 # Applications of SICK BIDE
 
 ## Modelling continuous distributions
@@ -24,3 +26,5 @@ BIDE is a neural network layer that takes binary input and predicts the logit of
 
 ## SICK
 SICK is a GPU-optimized kernel that computes the integrals needed for the computation of BIDE. This include the normalization constant for the softmax computation in the forward pass. But SICK is also used in the backward pass to compute the gradients of the loss with respect to the model parameters. You can seee how it's possible in the [backward pass of the fused NLL loss and softmax kernel](docs/sick_nll_kernel_bwd.md).
+
+👉 For more insights join the [DuonLabs community on telegram](https://t.me/DuonLabs)
